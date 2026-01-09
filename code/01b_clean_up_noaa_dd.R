@@ -1,21 +1,54 @@
 library(tidyverse)
-
+library(sf)
 
 ## ----------------------------------------------------------------------------=
 # Imports ----
 ## ----------------------------------------------------------------------------=
 
-## Regex to match up with our test states for the moment
+ipums_co <-
+  read_sf(
+    here::here(
+      'data',
+      'ipums',
+      'nhgis0005_shape',
+      'nhgis0005_shapefile_tl2010_us_county_2010',
+      'US_county_2010.shp'
+    )
+  ) |>
+  st_drop_geometry()
+
+## IPUMS 2010 File for GISJOIN Field
+
 tst_states <-
-  c('cdd_CA|cdd_TX|cdd_AZ|cdd_DE|cdd_FL|cdd_IL|cdd_IN')
+  c(
+    'IL',
+    'IN',
+    'CA',
+    'AZ',
+    'NM',
+    'TX',
+    'FL',
+    'CA',
+    'WA',
+    'NY',
+    'PA',
+    'DE',
+    'MN',
+    'ND'
+  )
+## Regex to match up with our test states for the moment
+#file_pattern <- paste('cdd_', sep = "", tst_states, collapse = '|')
 
 noaa_files <-
   list.files(
     here::here('data', 'noaa', 'intermediate'),
     full.names = TRUE,
-    pattern = tst_states
+    pattern = 'cdd_'
   )
 
+## States that we've pulled data for (Still missing a few)
+state_abbrev <- sub(".*_([A-Z]{2})-.*", "\\1", basename(noaa_files))
+unique(state_abbrev)
 
 noaa_csvs <-
   map(noaa_files, read_csv, show_col_types = FALSE) |>
@@ -149,6 +182,7 @@ state_fips_tbl <- tibble(
   )
 )
 
+## Clean up data and add in some cleaner geographic identifers
 cdd_day_avgs_cl <-
   degree_day_avgs |>
   filter(metric == 'cdd') |>
@@ -158,4 +192,14 @@ cdd_day_avgs_cl <-
     names = c('st_abb', 'co_fips')
   ) |>
   left_join(state_fips_tbl, by = c('st_abb' = 'state')) |>
-  mutate(geoid = glue::glue('{fips}{co_fips}'))
+  mutate(geoid = glue::glue('{fips}{co_fips}')) |>
+  left_join(
+    ipums_co,
+    by = c('geoid' = 'GEOID10')
+  )
+
+
+saveRDS(
+  cdd_day_avgs_cl,
+  here::here('data', 'workflow_dat', 'cdd_avg_state_sample.rds')
+)

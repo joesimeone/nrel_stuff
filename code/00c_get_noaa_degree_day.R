@@ -1,9 +1,34 @@
 library(tidyverse)
 library(httr2)
 library(glue)
-library(tigris)
+#library(tigris)
+library(sf)
+library(duckdb)
 
-options(tigris_use_cache = TRUE)
+## Database connection, where clean NREL data lives
+con <- dbConnect(duckdb(), here::here('data', 'nrel.duckdb'))
+
+dbListTables(con)
+
+## Create db lazy table
+nrel_clean <- tbl(con, 'nrel_clean')
+
+## Helps us line up GEOID and GISGEOID down stream
+ipums_co_2010 <-
+  read_sf(
+    here::here('data', 'ipums', 'us_county_2010.shp')
+  ) |>
+  st_drop_geometry() |>
+  select(GEOID10, GISJOIN, ALAND10) |>
+  as_tibble()
+
+
+### NOTE: This is set up theorteically to get all cdds and hdds for every county at
+## once (from 1970 - 2019), but I think it's a lot too request at once for NOAA.
+## So I wound up doing a lot of filtering and writing a quick thing that chekcs if
+## a file is already present in the the directory where I've stuck the... bajillion
+## csvs
+
 build_degree_day_call <- function(metric, county) {
   ## Path to NOAA API
   url_glue_string <-
@@ -29,144 +54,174 @@ build_degree_day_call <- function(metric, county) {
 # Query Arguments --------------------------------------------------------
 
 ## To help us make the api call more iterative
-
-## Get county info
-co_info <- counties(year = 2010) |>
-  sf::st_drop_geometry() |>
-  as_tibble()
-
-## Get State abbs
-state_fips_tbl <- tibble(
-  state = c(
-    "AL",
-    "AK",
-    "AZ",
-    "AR",
-    "CA",
-    "CO",
-    "CT",
-    "DE",
-    "FL",
-    "GA",
-    "HI",
-    "ID",
-    "IL",
-    "IN",
-    "IA",
-    "KS",
-    "KY",
-    "LA",
-    "ME",
-    "MD",
-    "MA",
-    "MI",
-    "MN",
-    "MS",
-    "MO",
-    "MT",
-    "NE",
-    "NV",
-    "NH",
-    "NJ",
-    "NM",
-    "NY",
-    "NC",
-    "ND",
-    "OH",
-    "OK",
-    "OR",
-    "PA",
-    "RI",
-    "SC",
-    "SD",
-    "TN",
-    "TX",
-    "UT",
-    "VT",
-    "VA",
-    "WA",
-    "WV",
-    "WI",
-    "WY",
-    "DC"
-  ),
-  fips = c(
-    "01",
-    "02",
-    "04",
-    "05",
-    "06",
-    "08",
-    "09",
-    "10",
-    "12",
-    "13",
-    "15",
-    "16",
-    "17",
-    "18",
-    "19",
-    "20",
-    "21",
-    "22",
-    "23",
-    "24",
-    "25",
-    "26",
-    "27",
-    "28",
-    "29",
-    "30",
-    "31",
-    "32",
-    "33",
-    "34",
-    "35",
-    "36",
-    "37",
-    "38",
-    "39",
-    "40",
-    "41",
-    "42",
-    "44",
-    "45",
-    "46",
-    "47",
-    "48",
-    "49",
-    "50",
-    "51",
-    "53",
-    "54",
-    "55",
-    "56",
-    "11"
-  )
-)
+#
+# ## Get county info
+# co_info <- counties(year = 2010) |>
+#   sf::st_drop_geometry() |>
+#   as_tibble()
+#
+# ## Get State abbs
+# state_fips_tbl <- tibble(
+#   state = c(
+#     "AL",
+#     "AK",
+#     "AZ",
+#     "AR",
+#     "CA",
+#     "CO",
+#     "CT",
+#     "DE",
+#     "FL",
+#     "GA",
+#     "HI",
+#     "ID",
+#     "IL",
+#     "IN",
+#     "IA",
+#     "KS",
+#     "KY",
+#     "LA",
+#     "ME",
+#     "MD",
+#     "MA",
+#     "MI",
+#     "MN",
+#     "MS",
+#     "MO",
+#     "MT",
+#     "NE",
+#     "NV",
+#     "NH",
+#     "NJ",
+#     "NM",
+#     "NY",
+#     "NC",
+#     "ND",
+#     "OH",
+#     "OK",
+#     "OR",
+#     "PA",
+#     "RI",
+#     "SC",
+#     "SD",
+#     "TN",
+#     "TX",
+#     "UT",
+#     "VT",
+#     "VA",
+#     "WA",
+#     "WV",
+#     "WI",
+#     "WY",
+#     "DC"
+#   ),
+#   fips = c(
+#     "01",
+#     "02",
+#     "04",
+#     "05",
+#     "06",
+#     "08",
+#     "09",
+#     "10",
+#     "12",
+#     "13",
+#     "15",
+#     "16",
+#     "17",
+#     "18",
+#     "19",
+#     "20",
+#     "21",
+#     "22",
+#     "23",
+#     "24",
+#     "25",
+#     "26",
+#     "27",
+#     "28",
+#     "29",
+#     "30",
+#     "31",
+#     "32",
+#     "33",
+#     "34",
+#     "35",
+#     "36",
+#     "37",
+#     "38",
+#     "39",
+#     "40",
+#     "41",
+#     "42",
+#     "44",
+#     "45",
+#     "46",
+#     "47",
+#     "48",
+#     "49",
+#     "50",
+#     "51",
+#     "53",
+#     "54",
+#     "55",
+#     "56",
+#     "11"
+#   )
+# )
+#
+# co_cdd_formatted <-
+#   co_info |>
+#   left_join(state_fips_tbl, by = c('STATEFP10' = 'fips')) |>
+#   select(state, COUNTYFP10) |>
+#   mutate(county_arg = glue('{state}-{COUNTYFP10}'), metric = 'cdd') |>
+#   filter(!state %in% c('AK', 'HI')) |>
+#   select(state, county_arg, metric) |>
+#   left_join(state_fips_tbl, by = c('state')) |>
+#   arrange(state, county_arg)
+#
+# co_hdd_formatted <-
+#   co_info |>
+#   left_join(state_fips_tbl, by = c('STATEFP10' = 'fips')) |>
+#   select(state, COUNTYFP10) |>
+#   mutate(county_arg = glue('{state}-{COUNTYFP10}'), metric = 'hdd') |>
+#   filter(!state %in% c('AK', 'HI')) |>
+#   select(state, county_arg, metric) |>
+#   arrange(county_arg) |>
+#   select(state, county_arg, metric) |>
+#   left_join(state_fips_tbl, by = c('state')) |>
+#   arrange(state, county_arg)
 
 co_cdd_formatted <-
-  co_info |>
-  left_join(state_fips_tbl, by = c('STATEFP10' = 'fips')) |>
-  select(state, COUNTYFP10) |>
-  mutate(county_arg = glue('{state}-{COUNTYFP10}'), metric = 'cdd') |>
-  filter(!state %in% c('AK', 'HI')) |>
-  select(state, county_arg, metric) |>
-  left_join(state_fips_tbl, by = c('state')) |>
-  arrange(state, county_arg)
-
-co_hdd_formatted <-
-  co_info |>
-  left_join(state_fips_tbl, by = c('STATEFP10' = 'fips')) |>
-  select(state, COUNTYFP10) |>
-  mutate(county_arg = glue('{state}-{COUNTYFP10}'), metric = 'hdd') |>
-  filter(!state %in% c('AK', 'HI')) |>
-  select(state, county_arg, metric) |>
-  arrange(county_arg) |>
-  select(state, county_arg, metric) |>
-  left_join(state_fips_tbl, by = c('state')) |>
-  arrange(state, county_arg)
-
+  nrel_clean %>%
+  mutate(
+    sample_group = case_when(
+      in_ashrae_iecc_climate_zone_2004 == '7B' ~ 'Cold, Very Cold Dry',
+      in_ashrae_iecc_climate_zone_2004 == '7A' ~ 'Cold, Very Cold Humid',
+      in_ashrae_iecc_climate_zone_2004 == "1A" ~ "Hot, Very Hot Humid",
+      in_ashrae_iecc_climate_zone_2004 == "2A" ~ "Hot, Very Hot Humid",
+      in_ashrae_iecc_climate_zone_2004 == "2B" ~ "Hot Dry",
+      in_ashrae_iecc_climate_zone_2004 == "3A" ~ "Warm Humid",
+      in_ashrae_iecc_climate_zone_2004 == "3B" ~ "Warm Dry",
+      in_ashrae_iecc_climate_zone_2004 == "3C" ~ "Warm Marine",
+      in_ashrae_iecc_climate_zone_2004 == "4A" ~ "Mixed Humid",
+      in_ashrae_iecc_climate_zone_2004 == "4B" ~ "Mixed Dry",
+      in_ashrae_iecc_climate_zone_2004 == "4C" ~ "Mixed Marine",
+      in_ashrae_iecc_climate_zone_2004 == "5A" ~ "Cool Humid",
+      in_ashrae_iecc_climate_zone_2004 == "5B" ~ "Cool Dry",
+      in_ashrae_iecc_climate_zone_2004 == "5C" ~ "Cool Marine",
+      in_ashrae_iecc_climate_zone_2004 == "6A" ~ "Cold, Very Cold Humid",
+      in_ashrae_iecc_climate_zone_2004 == "6B" ~ "Cold, Very Cold Dry"
+    )
+  ) |>
+  distinct(sample_group, in_state, in_county) |>
+  collect() |>
+  left_join(ipums_co_2010, by = c('in_county' = 'GISJOIN')) |>
+  mutate(
+    county_arg = str_sub(GEOID10, 3, 5),
+    county_arg = str_glue('{in_state}-{county_arg}'),
+    metric = 'cdd'
+  )
 
 # Finish up argument prep -------------------------------------------------
 
@@ -185,7 +240,8 @@ redund_files <-
 cdd_args <-
   co_cdd_formatted |>
   mutate(exists_filter = glue::glue('{metric}_{county_arg}')) |>
-  filter(fips == '48' & !exists_filter %in% redund_files) |>
+  filter(!exists_filter %in% redund_files) |>
+  filter(sample_group == 'Hot, Very Hot Humid', county_arg != 'HI-NA') |>
   select(metric, county_arg)
 
 hdd_args <-

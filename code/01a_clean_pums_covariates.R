@@ -5,7 +5,6 @@ library(tigris)
 library(sf)
 
 
-options(tigris_use_cache = TRUE)
 ## ----------------------------------------------------------------------------=
 # Imports ---
 ## ----------------------------------------------------------------------------=
@@ -30,6 +29,21 @@ puma_shp <-
 puma_shp <-
   puma_shp |>
   mutate(unique_puma = glue::glue('{STATEFP10}{PUMACE10}'))
+
+
+## We'll also import ipums files for the gisjoin code, which is the only
+## thing that's available in NREL
+ipums_pumas_2010 <-
+  read_sf(
+    here::here(
+      'data',
+      'ipums',
+      'ipums_puma_2010',
+      'ipums_puma_2010.shp'
+    )
+  ) |>
+  st_drop_geometry() |>
+  as_tibble()
 
 # Common Function ---------------------------------------------------------
 get_pums_pcts <- function(dat, demo_var) {
@@ -125,11 +139,11 @@ puma_pcts_wide <-
 pumas_pop <-
   puma_pcts[[1]] |>
   select(unique_puma, pop) |>
+  summarise(pop = sum(pop), .by = c(unique_puma)) |>
   left_join(puma_shp, by = c('unique_puma')) |>
   mutate(pop_density_per_sq_mi = pop / (ALAND10 / 2589988.11)) |>
   select(unique_puma, NAME10, pop, ALAND10, pop_density_per_sq_mi) |>
   janitor::clean_names()
-
 
 ## ----------------------------------------------------------------------------=
 # Get some household variable medians just in case -----
@@ -161,14 +175,15 @@ pums_hh_med_covars <-
     .by = c('unique_puma')
   )
 
-
+arrange(pums_hh_med_covars, unique_puma)
 ## ---------------------------------------------------------------------------=
 # Combine Covariates Data -----
 ## ---------------------------------------------------------------------------=
 
 puma_pcts_fin <-
   puma_pcts_wide |>
-  reduce(left_join)
+  reduce(left_join) |>
+  arrange(unique_puma)
 
 puma_covars_fin <-
   pumas_pop |>
@@ -179,9 +194,13 @@ puma_covars_fin <-
   left_join(
     pums_hh_med_covars,
     by = c('unique_puma')
+  ) |>
+  left_join(
+    ipums_pumas_2010,
+    by = c('unique_puma' = 'GEOID')
   )
 
-write_csv(
+saveRDS(
   puma_covars_fin,
-  'data/workflow_dat/puma_2019_5yr_covars.csv'
+  'data/workflow_dat/puma_2019_5yr_covars.rds'
 )

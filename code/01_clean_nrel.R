@@ -23,9 +23,15 @@ nrel_narrowed <-
     weight,
     in.occupants,
     in.building_america_climate_zone,
+    in.ashrae_iecc_climate_zone_2004,
+    in.ashrae_iecc_climate_zone_2004_sub_cz_split,
     in.state,
     in.county_name,
     in.puma,
+    in.county,
+    in.county_and_puma,
+    in.county_metro_status,
+    in.puma_metro_status,
     in.bedrooms,
     in.geometry_building_type_acs,
     in.federal_poverty_level,
@@ -36,6 +42,7 @@ nrel_narrowed <-
     in.vintage,
     in.vintage_acs,
     in.tenure,
+    in.weather_file_city,
 
     ## Is using estimates in the model cool??
     out.utility_bills.electricity_bill..usd,
