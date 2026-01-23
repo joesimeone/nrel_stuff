@@ -65,7 +65,6 @@ nrel_joined_dat <-
   collect() |>
   janitor::clean_names()
 
-
 if (!c('nrel_covars_fin') %in% dbListTables(con)) {
   dbWriteTable(con, 'nrel_covars_fin', nrel_joined_dat)
 } else {

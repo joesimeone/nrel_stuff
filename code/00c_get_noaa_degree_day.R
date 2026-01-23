@@ -6,7 +6,7 @@ library(sf)
 library(duckdb)
 
 ## Database connection, where clean NREL data lives
-con <- dbConnect(duckdb(), here::here('data', 'nrel.duckdb'))
+con <- dbConnect(duckdb(), here::here('data', 'nrel.duckdb'), read_only = TRUE)
 
 dbListTables(con)
 
@@ -223,6 +223,38 @@ co_cdd_formatted <-
     metric = 'cdd'
   )
 
+
+co_hdd_formatted <-
+  nrel_clean %>%
+  mutate(
+    sample_group = case_when(
+      in_ashrae_iecc_climate_zone_2004 == '7B' ~ 'Cold, Very Cold Dry',
+      in_ashrae_iecc_climate_zone_2004 == '7A' ~ 'Cold, Very Cold Humid',
+      in_ashrae_iecc_climate_zone_2004 == "1A" ~ "Hot, Very Hot Humid",
+      in_ashrae_iecc_climate_zone_2004 == "2A" ~ "Hot, Very Hot Humid",
+      in_ashrae_iecc_climate_zone_2004 == "2B" ~ "Hot Dry",
+      in_ashrae_iecc_climate_zone_2004 == "3A" ~ "Warm Humid",
+      in_ashrae_iecc_climate_zone_2004 == "3B" ~ "Warm Dry",
+      in_ashrae_iecc_climate_zone_2004 == "3C" ~ "Warm Marine",
+      in_ashrae_iecc_climate_zone_2004 == "4A" ~ "Mixed Humid",
+      in_ashrae_iecc_climate_zone_2004 == "4B" ~ "Mixed Dry",
+      in_ashrae_iecc_climate_zone_2004 == "4C" ~ "Mixed Marine",
+      in_ashrae_iecc_climate_zone_2004 == "5A" ~ "Cool Humid",
+      in_ashrae_iecc_climate_zone_2004 == "5B" ~ "Cool Dry",
+      in_ashrae_iecc_climate_zone_2004 == "5C" ~ "Cool Marine",
+      in_ashrae_iecc_climate_zone_2004 == "6A" ~ "Cold, Very Cold Humid",
+      in_ashrae_iecc_climate_zone_2004 == "6B" ~ "Cold, Very Cold Dry"
+    )
+  ) |>
+  distinct(sample_group, in_state, in_county) |>
+  collect() |>
+  left_join(ipums_co_2010, by = c('in_county' = 'GISJOIN')) |>
+  mutate(
+    county_arg = str_sub(GEOID10, 3, 5),
+    county_arg = str_glue('{in_state}-{county_arg}'),
+    metric = 'hdd'
+  )
+
 # Finish up argument prep -------------------------------------------------
 
 ## Takes a metric, and county argument, but we don't want to re-pull
@@ -241,13 +273,13 @@ cdd_args <-
   co_cdd_formatted |>
   mutate(exists_filter = glue::glue('{metric}_{county_arg}')) |>
   filter(!exists_filter %in% redund_files) |>
-  filter(sample_group == 'Hot, Very Hot Humid', county_arg != 'HI-NA') |>
+  filter(sample_group == 'Cold, Very Cold Dry', county_arg != 'HI-NA') |>
   select(metric, county_arg)
 
 hdd_args <-
   co_hdd_formatted |>
   mutate(exists_filter = glue::glue('{metric}_{county_arg}')) |>
-  filter(fips == '18' & !exists_filter %in% redund_files) |>
+  filter(in_state == 'MD' & !exists_filter %in% redund_files) |>
   select(metric, county_arg)
 
 # chima_args <-
@@ -315,7 +347,7 @@ pwalk(cdd_args, function(county_arg, metric) {
 })
 
 
-pwalk(hdd_chima, function(county_arg, metric) {
+pwalk(hdd_args, function(county_arg, metric) {
   cli::cli_alert('Trying noaa for {county_arg}:')
 
   noaa_json <-

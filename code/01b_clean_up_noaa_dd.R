@@ -46,9 +46,9 @@ noaa_files <-
     pattern = 'cdd_'
   )
 
-## States that we've pulled data for (Still missing a few)
+## States that we've pulled data for
 state_abbrev <- sub(".*_([A-Z]{2})-.*", "\\1", basename(noaa_files))
-unique(state_abbrev)
+length(unique(state_abbrev))
 
 noaa_csvs <-
   map(noaa_files, read_csv, show_col_types = FALSE) |>

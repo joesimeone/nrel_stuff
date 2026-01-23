@@ -43,6 +43,7 @@ nrel_narrowed <-
     in.vintage_acs,
     in.tenure,
     in.weather_file_city,
+    in.metropolitan_and_micropolitan_statistical_area,
 
     ## Is using estimates in the model cool??
     out.utility_bills.electricity_bill..usd,
@@ -65,7 +66,8 @@ nrel_narrowed <-
     in.roof_material,
     in.geometry_wall_exterior_finish,
     in.hvac_cooling_type,
-    in.hvac_heating_type
+    in.hvac_heating_type,
+    contains(c('cool'))
   ) %>%
   collect() %>%
   janitor::clean_names()
