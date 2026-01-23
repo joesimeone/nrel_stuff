@@ -1,0 +1,643 @@
+---
+title: "NREL Modeling | Preliminary Exploration"
+format:
+  html:
+    other-links: 
+    - text: 'Building America Climate Zones'
+      href: https://www.energy.gov/eere/buildings/building-america-climate-specific-guidance
+editor: source
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r}
+#| label: 'setup'
+#| include: false
+
+library(tidyverse)
+library(duckdb)
+library(ggiraph)
+library(mapgl)
+library(tigris)
+library(sf)
+library(tinytable)
+library(ggiraph)
+library(rsample)
+
+
+options(tigris_use_cache = TRUE)
+
+con <- dbConnect(duckdb(), here::here('data', 'nrel.duckdb'))
+
+dbListTables(con)
+
+nrel_clean <- tbl(con, 'nrel_clean')
+
+clim_zones <-
+  read_csv(
+    "C:/Users/js5466/OneDrive - Drexel University/heat_study_prism_data/resources/climate_zones.csv"
+  ) %>%
+  janitor::clean_names() %>%
+  mutate(co_geoid = glue::glue('{state_fips}{county_fips}'))
+
+co_2010 <- counties(year = 2010, resolution = '20m')
+
+territories <-
+  clim_zones |> 
+  anti_join(co_2010, by = c('co_geoid' = 'GEOID10')) |> 
+  select(co_geoid) |> 
+  pull()
+
+
+
+ipums_pums_2010 <-
+  read_sf(
+    here::here('data',
+               'ipums',
+               'ipums_puma_2010',
+               'ipums_puma_2010.shp')
+  ) |> 
+  st_drop_geometry() |> 
+  select(GEOID, GISJOIN) |> 
+  as_tibble()
+
+ipums_co_2010 <-
+  read_sf(
+    here::here('data',
+               'ipums',
+               'us_county_2010.shp')
+  ) |> 
+  st_drop_geometry() |> 
+  select(GEOID10, GISJOIN, ALAND10) |> 
+  as_tibble()
+
+
+
+clim_zone_classes_iecc <-
+read_csv(here::here(
+          'quarto',
+          'spend_sample_exploration',
+          'data',
+          'iecc_clim_zone_classifications.txt'
+))
+
+chima_tbl <-
+  readxl::read_xlsx(here::here(
+          'quarto',
+          'spend_sample_exploration',
+          'data',
+          'chima_dis_table .xlsx'
+)) |> 
+janitor::clean_names()
+
+
+```
+
+# Spending the NREL Sample 
+
+**Purpose**: Using the variables avaialble in both the NREL housing restock data and the PUMs - MDAC 2008 sample, we want to create reliable models of indoor temperature. To accomplish this, the first thing to think through is how best to spend the NREL restock data. By 'spending the NREL sample', I mean figuring out how best to use our available data to:
+
+1. Fit a model that can be applied reliably out of sample to the MDAC cohort.
+1. Test the accuracy of those fitted models.
+
+## NREL Basics & Resampling
+
+NREL ReStock is a '*highly granular, bottom-up model that uses multiple data sources, statistical sampling methods, and advanced building energy simulations of the residential building stock across the contiguous United States.*' (Make footnote: [Getting Started with ResStock ](https://nrel.github.io/ResStock.github.io/)). It incorporates data from the 2009 Residential Energy Consumption Survey (RECs), the 5-year 2019 PUMs Survey (PUMs), and the American Housing Survey (AHS) to estimate energy consumption across residential housing stock. 
+
+```{r}
+#| label: 'top level NREL count'
+#| include: false
+
+samp_size_raw <-
+nrel_clean |> 
+count() |> 
+collect() |> 
+mutate(n = format(n, big.mark = ',')) |> 
+pull()
+
+samp_size_wgt <-
+nrel_clean |> 
+summarise(n = sum(weight)) |> 
+collect() |> 
+mutate(n = format(n, big.mark = ',')) |> 
+pull()
+
+```
+
+Once these data have been filtered to include only non-vacant housing units, we start with a sample size of `r samp_size_raw`, representing `r samp_size_wgt` US housing units. 
+
+Off the jump, our first instinct might just be to use the whole sample to relate 
+some battery of predictors to indoor temperature, and apply those results to the 
+MDAC cohort. This approach, however, is likely to result in sub-optimal model performance for a few reasons. Firstly, the contiguous US is a big, weird place. Housing Stock is likely to vary depending upon where it is built, the climatic conditions it was built to withstand, and the time period of its construction. A more performant model would need take geographic, climatic, and temporal conditions into account, either as stratification variables or controls. Secondly, we would not be making the best possible use of availalble data. [Resampling methods](https://bookdown.org/taylordunn/islr-tidy-1655226885741/resampling-methods.html), which split the initial sample into different subsets of data, allow us to more efficiently train and test our models over repeated iterations.
+
+Knowing that resampling methods like cross-fold validation exist, however, is only
+half of the battle. ReStock features a range of different geographies and housing characteristics. Choosing the optimal way to resample the available data is not straightforward. It requires analysts to balance tradeoffs between sample size and similarity between training and testing splits, to apply domain specific knowledge to identify the most relevant predictors of indoor temperature, and to choose the best criteria to assess model performance. No matter how fancy a model specification that we choose, or how creative that we get with the available ReStock data, we still face tradeoffs, choices, and assumptions to assign MDAC respondents to typical indoor temperature estimate. 
+
+Below, users will find my attempts to reason through this problem in the Heat Study setting. 
+
+# Climate Regions
+
+```{r}
+#| label: 'get housing density per square mile'
+#| include: false
+
+
+co_housing_density <- 
+  nrel_clean |> 
+  filter(!in_state %in% c('AK', 'HI')) |> 
+  summarise(
+    n_homes = n(),
+    n_wgt_homes = sum(weight),
+    .by = in_county
+  ) |> 
+  collect() |> 
+  left_join(
+    ipums_co_2010, by = c('in_county' = 'GISJOIN')
+  ) |> 
+  mutate(house_density_per_sqmi = n_wgt_homes / (ALAND10 / 2589988.11))
+  
+
+```
+
+
+# International Energy Conservation Code (IECC) 2004 Climate zone classifications 
+
+The IECC categorizes US counties into different [climate zones](https://codes.iccsafe.org/content/IECC2012P5/chapter-3-ce-general-requirements#IECC2012_Pt01_Ch03_SecC301) depending on their outdoor condition in the warmest and hottest months of the year, and how much moisture or dryness they experience. Climate zones are useful in the Heat study setting because outdoor weather conditions can impact housing construction and indoor temperatures. When a person adjusts their thermostat, for example, it is in response to how hot or cold it is outside. Further, these climate zones are used to inform programs like the [Building Energy Codes Program](https://www.energy.gov/eere/buildings/building-energy-codes-program), which provide technical assistance to builders in meeting minimum energy efficiency standards.    
+
+## IECC 2004 Climate Zone Map | US Counties 
+```{r}
+#| label: 'first mapgl crack'
+#| echo: false
+#| fig-cap: '*County Climate Zone Designations | How analysts will stratify the model*'
+
+clim_reg_sf <-
+  clim_zones |>
+  filter(!co_geoid %in% territories) |> 
+  filter(!state_fips %in% c('02', '15')) |> 
+  left_join(co_2010, by = c('co_geoid' = 'GEOID10')) |>
+  left_join(co_housing_density |> select(GEOID10, n_homes, n_wgt_homes, house_density_per_sqmi), by = c('co_geoid' = 'GEOID10')) |> 
+  mutate(across(where(is.character), ~iconv(., "UTF-8", "UTF-8", sub = ""))) |> ## Maplibre doesn't like one of the columns 
+  mutate(climate_region = 
+         case_when(ba_climate_zone %in% c("Cold", "Very Cold") ~
+                                          "Cold & Very Cold",
+                   ba_climate_zone %in% c("Hot-Dry", "Mixed-Dry") ~
+                                          "Hot-Dry & Mixed Dry",
+                   TRUE ~ ba_climate_zone),
+         iecc_climate_region =
+           str_glue('{iecc_climate_zone}{iecc_moisture_regime}'),
+         iecc_climate_region_str = 
+           case_when(
+                iecc_climate_region == "1A" ~ "Very Hot Humid (1A)",
+                iecc_climate_region == "2A" ~ "Hot Humid (2A)",
+                iecc_climate_region == "2B" ~ "Hot Dry (2B)",
+                iecc_climate_region == "3A" ~ "Warm Humid (3A)",
+                iecc_climate_region == "3B" ~ "Warm Dry (3B)",
+                iecc_climate_region == "3C" ~ "Warm Marine (3C)",
+                iecc_climate_region == "4A" ~ "Mixed Humid (4A)",
+                iecc_climate_region == "4B" ~ "Mixed Dry (4B)",
+                iecc_climate_region == "4C" ~ "Mixed Marine (4C)",
+                iecc_climate_region == "5A" ~ "Cool Humid (5A)",
+                iecc_climate_region == "5B" ~ "Cool Dry (5B)",
+                iecc_climate_region == "5C" ~ "Cool Marine (5C)",
+                iecc_climate_region == "6A" ~ "Cold Humid (6A)",
+                iecc_climate_region == "6B" ~ "Cold Dry (6B)",
+                iecc_climate_region == "7N/A"  ~ "Very Cold (7)",
+                iecc_climate_region == "8"  ~ "Subarctic (8)",
+                TRUE ~ iecc_climate_region
+  )
+) |>   
+  mutate(climate_region = as.factor(climate_region),
+         iecc_climate_region = as.factor(iecc_climate_region),
+         iecc_climate_region_fac = as.factor(iecc_climate_region_str)) |> 
+  select(state, 
+         co_geoid, 
+         NAMELSAD10, 
+         climate_region, 
+         iecc_climate_region_fac,
+         n_homes,
+         n_wgt_homes,
+         house_density_per_sqmi,
+         geometry) |> 
+  st_as_sf()
+
+## Formatting numeric variables for map popup
+clim_reg_sf <-
+  clim_reg_sf |> 
+  mutate(
+    n_homes = round(n_homes, 3),
+    n_wgt_homes = round(n_wgt_homes),
+    house_density_per_sqmi_format = round(house_density_per_sqmi, 3),
+    n_homes_format = format(n_homes, big.mark = ","),
+    n_wgt_homes_format = format(n_wgt_homes, big.mark = ",")
+  )
+
+## Hopefully makes this less of a memory hog... 
+clim_reg_sf <- st_simplify(clim_reg_sf, dTolerance = 25)
+
+st_broad_boundaries <-
+  clim_reg_sf |> 
+  group_by(state) |> 
+  summarise(new_geom = st_union(geometry))
+
+
+# 
+# my_colors <- 
+#   c('Hot Dry' = "#FB6A4A",
+#     'Hot Humid' = "#EF3B2C",
+#      "Very Hot Humid" = "#A50F15",
+#     'Cold Dry' = "#2171B5",
+#     'Cold Humid' = "#08306B",
+#     'Very Cold' = ,
+#     'Warm Dry' = "#FCBBA1",
+#     'Warm Marine' = "#D94801",
+#     'Mixed Marine' = "#C6DBEF",
+#     "Cool Marine" = "#6BAED6",
+#     'Warm Humid' = "#006D2C",
+#     'Mixed Humid' = "#41AB5D",
+#     'Cool Humid' = "#74C476",
+#     'Cool Dry' = "#A1D99B")
+
+
+
+
+clim_colors <-
+  c('#2171B5',
+    "#08306B",
+    "#A1D99B",
+    "#74C476",
+    "#FB6A4A",
+    "#EF3B2C",
+    "#FCBBA1",
+    "#41AB5D",
+    "#C6DBEF",
+    "#3F007D",
+    "#A50F15",
+    "#FEE0D2",
+    "#A63603",
+    "#D94801"
+    )
+
+
+clim_reg_sf$map_popup <-
+  str_glue("<div style='text-align: center;'>
+    <u> {clim_reg_sf$iecc_climate_region_fac} IECC Climate Region </u></div>
+    <br> <strong> County Info: </strong> {clim_reg_sf$NAMELSAD10}, {clim_reg_sf$state}
+    <br> <strong> Housing Units: </strong> {clim_reg_sf$n_wgt_homes_format}
+    <br> <strong> Housing Density: </strong> {clim_reg_sf$house_density_per_sqmi_format}
+    <br> <strong> Broad Building America Climate Region: {clim_reg_sf$climate_region} </strong>"
+  )
+
+clim_fill_color_expr <-
+match_expr(
+  column = 'iecc_climate_region_fac',
+  values = levels(clim_reg_sf$iecc_climate_region_fac),
+  stops = clim_colors
+)
+
+
+maplibre(bounds = clim_reg_sf) |>
+  add_fill_layer(
+    id = 'counties_fill',
+    source = clim_reg_sf,
+    fill_color = clim_fill_color_expr,
+    popup = "map_popup",
+    tooltip = 'NAMELSAD10',
+    hover_options = 
+      list(
+        fill_color = 'gold',
+        fill_opacity = 1
+      )
+  ) |> 
+  add_line_layer(
+    id = 'counties_outline',
+    source = clim_reg_sf,
+    line_color = 'darkgray',
+    line_opacity = .75,
+    line_width = 1  # Adjust this value as needed
+  ) |> 
+  add_line_layer(
+    id = 'clim_reg_broad',
+    source = st_broad_boundaries,
+    line_width = .75,
+    line_opacity = .55,
+    line_color = '#212122'
+  ) |> 
+  add_legend(
+    "IECC 2004 Climate Regions",
+    values = levels(clim_reg_sf$iecc_climate_region_fac),
+    colors = clim_colors, 
+    type = 'categorical',
+    position = 'bottom-left')
+
+
+```
+
+
+Zone numbers refer to the outdoor temperature condition in a given IECC climate zone:
+
+```{r}
+#| label: 'cdd hdd tt'
+#| echo: false
+#| fig-cap: '*IECC Climate Zone Designations*'
+
+
+tt(clim_zone_classes_iecc) |> 
+theme_html(class = "tinytable tinytable-striped")
+
+```
+
+To Add to tables:
+
+CDD: Cooling Degree Days | How often it was hot enough to use AC (50 seems a little low?)
+HDD: Heating Degree Days | How often it was cold enough to use Heat (Base 65) ( I thint these are either 6 months or a year, based on [building america manual](https://www.osti.gov/servlets/purl/1893981/) )
+
+Letters (A, B, C) refer to a region's mositure (A Humid, B Dry, C Marine) 
+
+![](helper_files/iecc_moisture_def.png){fig-cap="*Taken from the [IECC site](https://codes.iccsafe.org/content/IECC2012P5/chapter-3-ce-general-requirements#IECC2012_Pt01_Ch03_SecC301)*"}
+
+## As Applied to NREL & Heat Study
+
+```{r}
+#| label: 'napkin math for iecc climate regions'
+#| echo: false
+#| warning: false
+
+
+counties_in_ashrae_cats <-
+  nrel_clean |> 
+  filter(!in_state %in% c('HI', 'AK')) |> 
+  summarise(
+    n_distinct_co = 
+      n_distinct(in_county),
+    .by = c(in_ashrae_iecc_climate_zone_2004)) |> 
+  collect()
+
+nrel_iecc_clim_reg_counts <-
+  nrel_clean |> 
+  summarise(
+    n_homes = n(),
+    n_wgt_homes = sum(weight),
+    .by = c(in_ashrae_iecc_climate_zone_2004)
+  ) |> 
+  collect() |> 
+  left_join(counties_in_ashrae_cats) |> 
+ # filter(in_ashrae_iecc_climate_zone_2004 != '7AK') |> 
+  mutate(
+    iecc_climate_region_str = 
+           case_when(
+                in_ashrae_iecc_climate_zone_2004 == "1A" ~ "Very Hot Humid (1A)",
+                in_ashrae_iecc_climate_zone_2004 == "2A" ~ "Hot Humid (2A)",
+                in_ashrae_iecc_climate_zone_2004 == "2B" ~ "Hot Dry (2B)",
+                in_ashrae_iecc_climate_zone_2004 == "3A" ~ "Warm Humid (3A)",
+                in_ashrae_iecc_climate_zone_2004 == "3B" ~ "Warm Dry (3B)",
+                in_ashrae_iecc_climate_zone_2004 == "3C" ~ "Warm Marine (3C)",
+                in_ashrae_iecc_climate_zone_2004 == "4A" ~ "Mixed Humid (4A)",
+                in_ashrae_iecc_climate_zone_2004 == "4B" ~ "Mixed Dry (4B)",
+                in_ashrae_iecc_climate_zone_2004 == "4C" ~ "Mixed Marine (4C)",
+                in_ashrae_iecc_climate_zone_2004 == "5A" ~ "Cool Humid (5A)",
+                in_ashrae_iecc_climate_zone_2004 == "5B" ~ "Cool Dry (5B)",
+                in_ashrae_iecc_climate_zone_2004 == "5C" ~ "Cool Marine (5C)",
+                in_ashrae_iecc_climate_zone_2004 == "6A" ~ "Cold Humid (6A)",
+                in_ashrae_iecc_climate_zone_2004 == "6B" ~ "Cold Dry (6B)",
+                in_ashrae_iecc_climate_zone_2004 %in% c("7A", '7B')  ~ "Very Cold (7A|B)",
+                in_ashrae_iecc_climate_zone_2004 == "7AK"  ~ "Subarctic",
+                TRUE ~ 'hmm'
+  ),
+  iecc_clim_reg_fac =
+    as.factor(iecc_climate_region_str)
+    ) |> 
+  arrange(iecc_clim_reg_fac, desc(n_wgt_homes)) |> 
+  filter(iecc_clim_reg_fac != 'Subarctic')
+
+wgt_ashrae_counts <-
+ggplot(
+  nrel_iecc_clim_reg_counts,
+  aes(
+    x = reorder(iecc_clim_reg_fac, n_wgt_homes),
+    y = n_wgt_homes,
+    fill = iecc_clim_reg_fac
+  )
+) +
+    geom_col_interactive(aes(tooltip = sprintf("%.1fM", n_wgt_homes / 1e6))) +
+  coord_flip() +
+  theme_minimal() +
+  scale_fill_manual(values = clim_colors) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(x = NULL,
+       y = 'Weighted Count') +
+  theme(legend.position = 'none')
+
+ashrae_counts <-
+  ggplot(
+  nrel_iecc_clim_reg_counts,
+  aes(
+    x = reorder(iecc_clim_reg_fac, n_homes),
+    y = n_homes,
+    fill = iecc_clim_reg_fac
+  )
+) +
+  geom_col_interactive(aes(tooltip = scales::comma(n_homes))) +
+  coord_flip() +
+  theme_minimal() +
+  scale_fill_manual(values = clim_colors) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(x = NULL,
+       y = 'Raw Count') +
+  theme(legend.position = 'none')
+
+```
+
+
+
+Within these stratified groups, let's look at our sample size 
+
+::: {.panel-tabset}
+
+### Raw Counts 
+
+```{r}
+#| label: 'raw clim graph'
+#| echo: false
+#| fig-width: 8
+#| fig-height: 6
+
+girafe(ggobj = ashrae_counts)
+```
+
+
+### Weighted 
+
+```{r}
+girafe(ggobj = wgt_ashrae_counts)
+```
+
+:::
+
+Stratification groups remain pretty much as is, but I combined very hot humid with hot humid, very cold dry with cold dry, and very cold humid with cold humid. Maximum difference between cold climates would be `r 12600 -7200`, though they're likely smaller (?). Minimum cooling degree day threshold for hot is 6, 300. Minimum for very hot is 9,000. 
+
+```{r}
+#| label: 'sample size napkin math'
+#| echo: false
+
+
+
+samp_size_napkin_math <- 
+nrel_clean |> 
+filter(!in_state %in% c('AK', 'HI')) |> 
+summarise(n = n(), .by = in_ashrae_iecc_climate_zone_2004) |> 
+collect() |> 
+arrange(desc(n)) |> 
+mutate(
+  sample_group =
+    case_when(
+    in_ashrae_iecc_climate_zone_2004 == '7B' ~ 'Cold, Very Cold Dry',
+    in_ashrae_iecc_climate_zone_2004 == '7A' ~ 'Cold, Very Cold Humid',
+      in_ashrae_iecc_climate_zone_2004 == "1A" ~ "Hot, Very Hot Humid",
+      in_ashrae_iecc_climate_zone_2004 == "2A" ~ "Hot, Very Hot Humid",
+      in_ashrae_iecc_climate_zone_2004 == "2B" ~ "Hot Dry",
+      in_ashrae_iecc_climate_zone_2004 == "3A" ~ "Warm Humid",
+      in_ashrae_iecc_climate_zone_2004 == "3B" ~ "Warm Dry",
+      in_ashrae_iecc_climate_zone_2004 == "3C" ~ "Warm Marine",
+      in_ashrae_iecc_climate_zone_2004 == "4A" ~ "Mixed Humid",
+      in_ashrae_iecc_climate_zone_2004 == "4B" ~ "Mixed Dry",
+      in_ashrae_iecc_climate_zone_2004 == "4C" ~ "Mixed Marine",
+      in_ashrae_iecc_climate_zone_2004 == "5A" ~ "Cool Humid",
+      in_ashrae_iecc_climate_zone_2004 == "5B" ~ "Cool Dry",
+      in_ashrae_iecc_climate_zone_2004 == "5C" ~ "Cool Marine",
+      in_ashrae_iecc_climate_zone_2004 == "6A" ~ "Cold, Very Cold Humid",
+      in_ashrae_iecc_climate_zone_2004 == "6B" ~ "Cold, Very Cold Dry",
+)) |> 
+group_by(sample_group) |> 
+summarise(initial_samp_size = sum(n)) |>
+ungroup() |> 
+mutate(hold_out = .15 * initial_samp_size,
+       training_sample_size = initial_samp_size - hold_out) |> 
+arrange(desc(initial_samp_size))
+
+tt(samp_size_napkin_math) |> theme_html(class = "tinytable tinytable-striped")
+ 
+```
+
+Not the real thing, no seed, but the final training set would something like 
+this: 
+```{r}
+#| echo: true
+#| collapse: true
+
+
+test_proportion <- .15
+
+clim_reg_main_split <- 
+  nrel_clean %>%
+  mutate(
+  sample_group =
+    case_when(
+    in_ashrae_iecc_climate_zone_2004 == '7B' ~ 'Cold, Very Cold Dry',
+    in_ashrae_iecc_climate_zone_2004 == '7A' ~ 'Cold, Very Cold Humid',
+      in_ashrae_iecc_climate_zone_2004 == "1A" ~ "Hot, Very Hot Humid",
+      in_ashrae_iecc_climate_zone_2004 == "2A" ~ "Hot, Very Hot Humid",
+      in_ashrae_iecc_climate_zone_2004 == "2B" ~ "Hot Dry",
+      in_ashrae_iecc_climate_zone_2004 == "3A" ~ "Warm Humid",
+      in_ashrae_iecc_climate_zone_2004 == "3B" ~ "Warm Dry",
+      in_ashrae_iecc_climate_zone_2004 == "3C" ~ "Warm Marine",
+      in_ashrae_iecc_climate_zone_2004 == "4A" ~ "Mixed Humid",
+      in_ashrae_iecc_climate_zone_2004 == "4B" ~ "Mixed Dry",
+      in_ashrae_iecc_climate_zone_2004 == "4C" ~ "Mixed Marine",
+      in_ashrae_iecc_climate_zone_2004 == "5A" ~ "Cool Humid",
+      in_ashrae_iecc_climate_zone_2004 == "5B" ~ "Cool Dry",
+      in_ashrae_iecc_climate_zone_2004 == "5C" ~ "Cool Marine",
+      in_ashrae_iecc_climate_zone_2004 == "6A" ~ "Cold, Very Cold Humid",
+      in_ashrae_iecc_climate_zone_2004 == "6B" ~ "Cold, Very Cold Dry"
+)) |> 
+  collect() |> ## GRRRRRR
+  group_by(sample_group) %>%
+  mutate(
+    split = if_else(
+      row_number() %in% sample(n(), size = round(n() * test_proportion)),
+      "test",
+      "train"
+    )
+  ) %>%
+  ungroup()
+
+## Remove 15 percent of obs randomly to test our tuned models
+nrel_train <- 
+  clim_reg_main_split %>% 
+  filter(split == "train") |> 
+  collect()
+
+nrel_test <- 
+  clim_reg_main_split %>% 
+  filter(split == "test")
+
+nrel_folds <-
+  vfold_cv(nrel_train, v = 10, strata = sample_group)
+
+nrel_folds
+```
+
+
+
+```{r}
+#| label: 'Building America climate regions'
+#| include: false
+
+
+
+
+clim_reg_colors <- 
+  c('#FDAE61', "#D53E4F", "#66C2A5", "#ABDDA4", "#3288BD")
+
+  
+
+
+samp_size <- 
+nrel_clean |> 
+summarise(
+  n_homes = n(),
+  n_wgt_homes = sum(weight),
+  .by = c(clim_reg, in_state, in_county_name)
+) |> 
+arrange(clim_reg, in_state, desc(n_wgt_homes)) |> 
+collect()
+
+
+## Top 10 Counties 
+top_10_counties <-
+  samp_size |> 
+  group_by(clim_reg) |> 
+  arrange(clim_reg, desc(n_wgt_homes)) |> 
+  slice_head(n = 10) |> 
+  ungroup()
+
+
+wgt_co_clim_n <-
+top_10_counties |> 
+mutate(st_co = str_glue('{in_state}_{in_county_name}'),
+       st_co = as.factor(st_co),
+       clim_reg = as.factor(clim_reg)) |> 
+ggplot(aes(st_co, n_wgt_homes)) +
+geom_col_interactive(color = 'lightgray') +
+coord_flip() +
+scale_y_continuous(labels = scales::comma) +
+facet_wrap(~clim_reg, scales = 'free') 
+
+co_clim_n <-
+top_10_counties |> 
+mutate(st_co = str_glue('{in_state}_{in_county_name}'),
+       st_co = as.factor(st_co),
+       clim_reg = as.factor(clim_reg)) |> 
+ggplot(aes(st_co, n_homes, fill = clim_reg)) +
+geom_col(color = 'lightgray') +
+coord_flip() +
+scale_y_continuous(labels = scales::comma) +
+facet_wrap(~clim_reg, scales = 'free') +
+theme_minimal() +
+scale_fill_manual(values = clim_reg_colors)
+
+
+
+
+
+```
+

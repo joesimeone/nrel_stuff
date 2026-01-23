@@ -1,0 +1,771 @@
+---
+title: "NREL Metadata Cooling Load | Evaluating Model Performance"
+Author: Joe Simeone
+format: 
+  html: 
+    toc: true
+    mainfont: inter
+    code-fold: true
+editor: source
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r}
+#| label: 'load libs data'
+#| include: false
+
+library(duckdb)
+library(tidyverse)
+library(tidymodels)
+library(reactable)
+library(ggiraph)
+
+## Imports  ----------------------------------------------------------------
+con <- dbConnect(duckdb(), here::here('data', 'nrel.duckdb'))
+
+dbListTables(con)
+
+
+model_eval_path <-
+  list.files(
+    here::here('data', 'workflow_dat', 'model_assessment'),
+    full.names = TRUE)
+
+test_model_obj <-
+  readRDS(model_eval_path[9])
+
+model_objs <-
+  map(model_eval_path, readRDS) |> 
+  set_names(basename(model_eval_path))
+
+pred_candidates <- 
+readxl::read_xlsx(
+  here::here(
+    'resources',
+    'nrel_heat_simulation_info.xlsx'
+  ),
+  sheet = 'predictor_candidates'
+) |> 
+filter(variable != 'avg_hdd')
+
+model_candidates <-
+  readxl::read_xlsx(
+    here::here(
+      'resources',
+      'model_candidates.xlsx'
+    )
+  )
+
+```
+
+::: callout-tip
+## Purpose
+
+To assess predictive models of [NREL's ReStock metadata](https://resstock.nrel.gov/datasets) on annual cooling energy load delivered in residential homes. Cooling energy load is a measure of how much heat an HVAC system removes from a home. I chose this variable because it is the most closely related to indoor temperature in the available dataset. As such, we can use it develop code that can be adapted to temperature outputs Chima's EnergyPlus models.
+
+Below, users will find information on outcomes, predictors, modeling strategies, and assessments of performance.
+:::
+
+# Heat Study \| Overarching Objective
+
+> **Aim 1:** *Quantify and compare associations of seasonal indoor and outdoor temperature with all cause, cardiovascular, respiratory, and renal disease mortality.*
+
+The Heat Study's aim 1 seeks to assess the association between indoor and outdoor temperature, and sevaral causes of death. To accomplish this task, we use the [Mortality Disparities in American Communities (MDAC)](https://www.census.gov/topics/research/mdac.html) resource, which links census respondents with death and disease outcomes starting in 2008 and running until 2019. Each of these respondents is then assigned a seasonal **outdoor** temperature from the [PRISM 8K gridded weather dataset](https://prism.oregonstate.edu/). **Indoor** temperature assignment, on the other hand, is trickier. This is because no good resource exists where **indoor temperature and our health outcomes** have been jointly observed.
+
+To work through this challenge, we use **\[EnergyPlus Modeling\]**(https://energyplus.net/) to simulate residential indoor temperatures. Because EnergyPlus models are informed by NREL data, and because that data source shares several common variables with our MDAC data source, we can assign these temperatures probabilistically to each cohort member.
+
+## Basic Workflow
+
+```{mermaid}
+flowchart TD
+    A[Fit Indoor Temperature Models on NREL / EnergyPlus Outputs] --> B[ Evaluate Model Performance]
+    B --> C{Performance Satisfactory?}
+    C -->|No| D[Try again]
+    D --> B
+    C -->|Yes| E[Final Evaluation on Holdout Set]
+    E --> F[Select Most Predictive Model]
+    F --> G[Apply Model to Predict Indoor Temperatures on PUMs / MDAC Cohort Data]
+    
+    style A fill:#fff3cd
+    style G fill:#fff3cd
+    
+```
+
+We'll:
+
+1.  Fit a model of indoor temperature as function of the NREL variables that are also availalable in PUMs / MDAC.
+2.  Evaluate model performance via cross-fold validation
+3.  Validate models against a randomly held out set of observations to ensure that we aren't overfitting.
+4.  Take our best model and apply it to PUMs / MDAC.
+
+I'll flesh out these details throughout the document, but this is the nutshell.
+
+::: callout-note
+For simplicity, I've used indoor temperature here, but throughout the document, I'll be using that cooling load variable as a stand-in. This is because the EnergyPlus models are still under development. I chose this variable because I believe it's the most closely related to our actual exposure of interest.
+:::
+
+# Pre-Processing
+
+In order to develop a predictive models of cooling load delivered using NREL data, we start by preparing the data Preparation includes **choosing the predictors most relevant to cooling load delivered**, **selecting the models** that we want to test, and making any **additional transformations** that we need to the data. Once the data has been pre-processed, we can move onto exploration (backwards maybe) and resampling methods.  
+
+## Predictors 
+
+
+
+```{r}
+#| label: 'pred candidate table'
+#| echo: false
+#| fig-cap: '*Predictor Candidates | Selected via relevance to indoor temperature and availability in PUMs / MDAC*'
+
+pred_candidates |> 
+reactable(striped = TRUE, 
+          searchable = TRUE, 
+          sortable = TRUE, 
+          filterable = TRUE) 
+
+```
+
+In the heat study setting, we are limited to the NREL variables that are also available in PUMs / MDAC. If we used additional variables from NREL, we would not be able to fit the same model out of sample to carry out our cooling load assignments. This means that, while better predictor specifications might exist that use more of the available NREL data, we cannot actually access them. 
+
+Within this constraint, our predictors fall into two broad buckets (captured by the **domain** column above):
+
+1. Variables collected at the individual household unit. These vary across each individual observation.
+1. Variables collected at the county level unit. These vary across geography.
+
+
+Variables were selected largely because of 2 papers:
+
+1. Zhang citation
+1. XGBOOST AC citation. 
+
+
+
+## Models Under Evaluation
+
+```{r}
+#| label: 'model candidate table'
+#| echo: false
+#| fig-cap: '*Model Candidates | Chosen based on previous work related to modeling energy consumption and air conditioning*'
+
+
+tinytable::tt(model_candidates) |> tinytable::theme_html(class = "tinytable tinytable-striped")
+```
+
+Here, I've just listed models loosely in terms of their complexity. Downstream, I'll fit each model along 10 random partitions (crossfold validation), and 
+evaluate them with the following metrics: (SEE Evalutaion section for equations, results etc etc )
+
+1. R2
+1. RMSE
+1. MAE
+1. MAPE
+
+Models were selected largely because of 2 papers:
+
+1. Zhang citation
+1. XGBOOST AC citation. 
+
+
+## Data Transformations
+
+NREL ReStock features vast information on household characteristics, socio-demographics, and modeled energy consumption patterns.  Pre transformations, these data have roughly 550,000 observations, where each row corresponds to an individual household unit. 
+
+```{r}
+#| echo: true
+#| code-fold: show
+#| collapse: true
+
+tbl(con, 'ann_results_upgrade_28') |> 
+count() |> 
+collect() |> 
+mutate(n = format(n, big.mark = ','))
+```
+
+From this initial dataset, I made the following transformations: 
+
+1. **Removed vacant households**
+1. **Removed households units with no cooling energy load delivered, either because that system was unavailable or they had no air-conditioning** | This one might seem weird because these are the people that we're most interested in... 
+1. **Removed 2 problem counties in VA and SD. This is because I was unable to collect cooling degree data from NOAA.**
+1. **Focused on contiguous United States and removed observations in DC**. 
+
+After these transformations, we're left with roughly 391,000 observations. 
+
+```{r}
+#| echo: true
+#| code-fold: show
+#| collapse: true
+
+tbl(con, 'nrel_clean') |> 
+filter( out_load_cooling_energy_delivered_kbtu != 0, ## No No AC houses for the moment
+    !in_state %in% c('HI', 'AK', 'DC'), ## Don't think that I can get cdd info for DC... (?)
+    in_county != 'G5106780') |> 
+collect() |>  
+count() ## There was also a weird cdd issue with a VA county)
+
+```
+
+### Incorporating Geographic Information 
+
+To incorporate the climatic differences across the contiguous United States, I stratified the models
+by [2004 ASHRAE Climate Zones](https://www.energy.gov/sites/prod/files/2015/10/f27/ba_climate_region_guide_7.3.pdf):
+
+
+## As Applied to NREL & Heat Study
+
+```{r}
+#| label: 'napkin math for iecc climate regions'
+#| echo: false
+#| warning: false
+
+
+counties_in_ashrae_cats <-
+  tbl(con, 'nrel_clean') |> 
+  filter( out_load_cooling_energy_delivered_kbtu != 0, ## No No AC houses for the moment
+    !in_state %in% c('HI', 'AK', 'DC'), ## Don't think that I can get cdd info for DC... (?)
+    in_county != 'G5106780') |> 
+  summarise(
+    n_distinct_co = 
+      n_distinct(in_county),
+    .by = c(in_ashrae_iecc_climate_zone_2004)) |> 
+  collect()
+
+nrel_iecc_clim_reg_counts <-
+  tbl(con, 'nrel_clean') |> 
+  filter( out_load_cooling_energy_delivered_kbtu != 0, ## No No AC houses for the moment
+    !in_state %in% c('HI', 'AK', 'DC'), ## Don't think that I can get cdd info for DC... (?)
+    in_county != 'G5106780') |> 
+  summarise(
+    n_homes = n(),
+    n_wgt_homes = sum(weight),
+    .by = c(in_ashrae_iecc_climate_zone_2004)
+  ) |> 
+  collect() |> 
+  left_join(counties_in_ashrae_cats) |> 
+ # filter(in_ashrae_iecc_climate_zone_2004 != '7AK') |> 
+  mutate(
+    iecc_climate_region_str = 
+           case_when(
+                in_ashrae_iecc_climate_zone_2004 == "1A" ~ "Very Hot Humid (1A)",
+                in_ashrae_iecc_climate_zone_2004 == "2A" ~ "Hot Humid (2A)",
+                in_ashrae_iecc_climate_zone_2004 == "2B" ~ "Hot Dry (2B)",
+                in_ashrae_iecc_climate_zone_2004 == "3A" ~ "Warm Humid (3A)",
+                in_ashrae_iecc_climate_zone_2004 == "3B" ~ "Warm Dry (3B)",
+                in_ashrae_iecc_climate_zone_2004 == "3C" ~ "Warm Marine (3C)",
+                in_ashrae_iecc_climate_zone_2004 == "4A" ~ "Mixed Humid (4A)",
+                in_ashrae_iecc_climate_zone_2004 == "4B" ~ "Mixed Dry (4B)",
+                in_ashrae_iecc_climate_zone_2004 == "4C" ~ "Mixed Marine (4C)",
+                in_ashrae_iecc_climate_zone_2004 == "5A" ~ "Cool Humid (5A)",
+                in_ashrae_iecc_climate_zone_2004 == "5B" ~ "Cool Dry (5B)",
+                in_ashrae_iecc_climate_zone_2004 == "5C" ~ "Cool Marine (5C)",
+                in_ashrae_iecc_climate_zone_2004 == "6A" ~ "Cold Humid (6A)",
+                in_ashrae_iecc_climate_zone_2004 == "6B" ~ "Cold Dry (6B)",
+                in_ashrae_iecc_climate_zone_2004 %in% c("7A", '7B')  ~ "Very Cold (7A|B)",
+                in_ashrae_iecc_climate_zone_2004 == "7AK"  ~ "Subarctic",
+                TRUE ~ 'hmm'
+  ),
+  iecc_clim_reg_fac =
+    as.factor(iecc_climate_region_str)
+    ) |> 
+  arrange(iecc_clim_reg_fac, desc(n_wgt_homes)) |> 
+  filter(iecc_clim_reg_fac != 'Subarctic')
+
+
+
+clim_colors <-
+  c('#2171B5',
+    "#08306B",
+    "#A1D99B",
+    "#74C476",
+    "#FB6A4A",
+    "#EF3B2C",
+    "#FCBBA1",
+    "#41AB5D",
+    "#C6DBEF",
+    "#3F007D",
+    "#A50F15",
+    "#FEE0D2",
+    "#A63603",
+    "#D94801"
+    )
+
+
+wgt_ashrae_counts <-
+ggplot(
+  nrel_iecc_clim_reg_counts,
+  aes(
+    x = reorder(iecc_clim_reg_fac, n_wgt_homes),
+    y = n_wgt_homes,
+    fill = iecc_clim_reg_fac
+  )
+) +
+    geom_col_interactive(aes(tooltip = sprintf("%.1fM", n_wgt_homes / 1e6))) +
+  coord_flip() +
+  theme_minimal() +
+  scale_fill_manual(values = clim_colors) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(x = NULL,
+       y = 'Weighted Count') +
+  theme(legend.position = 'none')
+
+ashrae_counts <-
+  ggplot(
+  nrel_iecc_clim_reg_counts,
+  aes(
+    x = reorder(iecc_clim_reg_fac, n_homes),
+    y = n_homes,
+    fill = iecc_clim_reg_fac
+  )
+) +
+  geom_col_interactive(aes(tooltip = scales::comma(n_homes))) +
+  coord_flip() +
+  theme_minimal() +
+  scale_fill_manual(values = clim_colors) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(x = NULL,
+       y = 'Raw Count') +
+  theme(legend.position = 'none')
+
+```
+
+
+
+Within these stratified groups, let's look at our sample size 
+
+::: {.panel-tabset}
+
+### Raw Counts 
+
+```{r}
+#| label: 'raw clim graph'
+#| echo: false
+#| fig-width: 8
+#| fig-height: 6
+
+girafe(ggobj = ashrae_counts)
+```
+
+
+### Weighted 
+
+```{r}
+girafe(ggobj = wgt_ashrae_counts)
+```
+
+:::
+
+
+
+Climate zones designations are assigned to each US county depending on the their **moisture levels**, the number of **heating degree days** they experience in the coldest six months of the year, and the number of **cooling degree days** they experience in the warmest six months of the year. Stratifying the data by climate make sense because thermostat behaviors are influenced by the outdoor condition a home experiences, although as we will see, these geographic units are still quite large and quite diverse (which proves problematic... :()
+
+(NEED TO PUBLISH MY CLIMATE MAP SO THAT I CAN LINK)
+
+### Predictor Transformations
+
+```{r}
+#| label: 'recipe steps'
+#| eval: false
+
+nrel_pre_spec <-
+  recipe(out_load_cooling_energy_delivered_kbtu ~ ., data = nrel_train) |>
+  update_role(
+    bldg_id,
+    in_county,
+    in_puma,
+    in_ashrae_iecc_climate_zone_2004,
+    new_role = "id"
+  ) %>%
+  # update_role(weight, new_role = "case_weights") %>%  # Add this line
+  step_zv(all_nominal_predictors()) %>%   ## No 0 variance
+  step_zv(all_numeric_predictors()) %>%   ## No 0 variance
+  step_normalize(all_numeric_predictors()) %>%  ## Scale / normalize numeric predictors
+  step_dummy(all_nominal_predictors())  ## Break up mult-cats into dummies 
+```
+
+
+# Exploration
+
+
+```{r}
+
+tbl_names <- dbListTables(con)
+tbl_names <- unique(tbl_names[grep('_assess', tbl_names)])
+
+# Create a list to pass to OJS
+ojs_data <- map(tbl_names, ~{
+  tbl(con, str_glue('train.{.x}')) |>
+    select(x_hhtype, x_year_broad, out_load_cooling_energy_delivered_kbtu) |>
+    collect() |>
+    mutate(table_name = .x)
+}) |> 
+  list_rbind()
+
+ojs_define(plot_data = ojs_data, table_list = tbl_names)
+
+```
+
+```{ojs}
+
+//| echo: false
+
+//| echo: false
+Plot = require("@observablehq/plot@0.6.13")
+
+// table_list is already an array, no transpose needed
+viewof selected_table = Inputs.select(
+  table_list,
+  {label: "Select Assessment Table:"}
+)
+
+// Use transpose for plot_data since it's a data frame
+filtered_data = transpose(plot_data).filter(d => d.table_name === selected_table)
+
+year_order = {
+  const order = {' Before 1940': 0, ' 1940 - 1980': 1, ' After 1980': 2};
+  return filtered_data.map(d => ({...d, year_order: order[d.x_year_broad] || 3}))
+    .sort((a, b) => a.year_order - b.year_order);
+}
+
+Plot.plot({
+  title: selected_table,
+  marginLeft: 60,
+  height: 400,
+  grid: true,
+  x: {label: "Cooling Energy Delivered (kBTU)"},
+  y: {label: "Count", tickFormat: "~s"},
+  color: {legend: true, scheme: "dark2"},
+  facet: {
+    data: year_order,
+    x: "x_year_broad",
+    marginRight: 80
+  },
+  marks: [
+    Plot.rectY(
+      year_order,
+      Plot.binX(
+        {y: "count"},
+        {x: "out_load_cooling_energy_delivered_kbtu", fill: "x_hhtype", thresholds: 30}
+      )
+    ),
+    Plot.ruleY([0])
+  ]
+})
+
+```
+
+# Resampling
+
+
+!['*Taken from Tidy Modeling with R*'](helper_files/cfv_exp.png)
+
+
+
+
+## Cross Fold Validation
+
+```{r}
+#| label: 'cfv demo'
+#| echo: true
+#| code-fold: show
+
+
+
+assess_file_name <- 'cold_humid_assess.rds'
+ashrae_clim_code <- '5A'
+
+
+nrel_demo <-
+  tbl(con, 'nrel_covars_fin') %>%
+  filter(
+    in_ashrae_iecc_climate_zone_2004 == ashrae_clim_code, ## Mixed humid climate region
+    out_load_cooling_energy_delivered_kbtu != 0, ## No No AC houses for the moment
+    in_state != 'DC', ## Don't think that I can get cdd info for DC... (?)
+    in_county != 'G5106780' ## There was also a weird cdd issue with a VA county
+  ) |>
+  select(
+    bldg_id,
+    #  weight,
+    in_county,
+    in_puma,
+    in_occupants,
+    in_ashrae_iecc_climate_zone_2004,
+    in_bedrooms,
+    in_tenure,
+    out_utility_bills_total_bill_usd,
+    x_hhtype,
+    x_hhincome,
+    x_year_broad,
+    pop_density_per_sq_mi,
+    at_least_hs,
+    black,
+    hispanic_or_latino,
+    contains(c('wgt_')),
+    mean_cdd,
+    out_load_cooling_energy_delivered_kbtu
+  ) |>
+  collect() |>
+  mutate(
+    across(where(is.character), ~ as.factor(.))
+  )
+
+
+
+set.seed(1 - 9 - 2025)
+
+test_proportion <- .2
+
+nrel_demo <- nrel_demo |>
+  mutate(
+    split = if_else(
+      row_number() %in% sample(n(), size = round(n() * test_proportion)),
+      "test",
+      "train"
+    )
+  )
+
+## Remove .2 percent of obs randomly to test our tuned models
+nrel_train <-
+  nrel_demo |>
+  filter(split == "train")
+#mutate(weight = frequency_weights(weight)) ## Going to ignore because all weights are the same
+
+nrel_test <-
+  nrel_demo |>
+  filter(split == "test")
+#mutate(weight = frequency_weights(weight)) ## Going to ignore because all weights are the same
+
+nrel_folds <-
+  vfold_cv(nrel_train, v = 10)
+
+nrel_folds
+```
+
+
+
+
+
+
+
+# Evaluation
+
+
+## Performance Metrics 
+
+```{r}
+
+
+
+clim_model_metrics <-
+map(names(model_objs),
+    ~pluck(model_objs[[.x]], 1)) |> 
+  set_names(names(model_objs))
+
+
+clim_model_metrics <-
+  imap(clim_model_metrics, ~.x |> mutate(clim_reg = .y)) |> 
+  list_rbind()
+
+cool_metrics_reactable <- clim_model_metrics |> 
+  mutate(
+    # 95% CI using standard error
+    ci_lower = mean - 1.96 * std_err,
+    ci_upper = mean + 1.96 * std_err
+  ) |> 
+  mutate(across(where(is.numeric), ~round(., 3))) |> 
+  mutate(metric_comb = str_glue('{mean} <br> ({ci_lower} - {ci_upper})')) |> 
+  pivot_wider(
+    id_cols = c('clim_reg', 'wflow_id', 'model'),  # or just 'wflow_id' if you want
+    names_from = .metric,
+    values_from = metric_comb
+  )
+
+
+cool_metrics_reactable |>
+  relocate(c('rsq', 'rmse'), .before = mae) |> 
+  select(-model) |> 
+  reactable(sortable = TRUE,
+            filterable = TRUE,
+            searchable = TRUE,
+            defaultColDef = colDef(html = TRUE),
+            striped = TRUE)
+```
+
+
+
+```{r}
+#| fig-width: 10
+#| fig-height: 10
+#| echo: false 
+#| warning: false
+
+
+cool_metrics_viz <- clim_model_metrics |> 
+  mutate(
+    # 95% CI using standard error
+    ci_lower = mean - 1.96 * std_err,
+    ci_upper = mean + 1.96 * std_err
+  ) |> 
+  mutate(across(where(is.numeric), ~round(., 3))) 
+
+
+cool_met_r2 <-
+cool_metrics_viz %>%  
+  filter(.metric == 'rsq') %>% 
+  mutate(wflow_id = fct_reorder(wflow_id, mean)) %>% # Arrange high to low
+  ggplot(aes(x = wflow_id, y = mean, color = wflow_id)) +
+  geom_point(size = 3) +
+  geom_errorbar(aes(ymin = ci_lower, ymax = ci_upper), width = 0.3) +  # Add CIs
+  facet_wrap(~clim_reg, scales = 'free_x') +
+  coord_flip() +
+  scale_y_continuous(limits = c(0, 0.8), breaks = seq(0, 0.9, 0.2)) +
+  theme_bw() +
+  scale_color_brewer(palette = 'Set1')
+
+
+cool_met_rmse <-
+cool_metrics_viz %>%  
+  filter(.metric == 'rmse') %>% 
+  mutate(wflow_id = fct_reorder(wflow_id, mean)) %>% # Arrange high to low
+  ggplot(aes(x = wflow_id, y = mean, color = wflow_id)) +
+  geom_point(size = 3) +
+  geom_errorbar(aes(ymin = ci_lower, ymax = ci_upper), width = 0.3) +  # Add CIs
+  facet_wrap(~clim_reg, scales = 'free_x') +
+  coord_flip() +
+ # scale_y_continuous(limits = c(0, 0.8), breaks = seq(0, 0.9, 0.2)) +
+  theme_bw() +
+  scale_color_brewer(palette = 'Set2')
+```
+
+::: {.panel-tabset}
+
+#### R2
+
+```{r}
+#| fig-width: 10
+#| fig-height: 10
+
+cool_met_r2
+
+
+```
+
+
+#### RMSE
+
+```{r}
+#| fig-width: 10
+#| fig-height: 10
+
+
+cool_met_rmse
+
+tbl(con, 'nrel_clean') |> 
+filter( out_load_cooling_energy_delivered_kbtu != 0, ## No No AC houses for the moment
+    !in_state %in% c('HI', 'AK', 'DC'), ## Don't think that I can get cdd info for DC... (?)
+    in_county != 'G5106780') |> 
+   mutate(
+    iecc_climate_region_str = 
+           case_when(
+                in_ashrae_iecc_climate_zone_2004 == "1A" ~ "Very Hot Humid (1A)",
+                in_ashrae_iecc_climate_zone_2004 == "2A" ~ "Hot Humid (2A)",
+                in_ashrae_iecc_climate_zone_2004 == "2B" ~ "Hot Dry (2B)",
+                in_ashrae_iecc_climate_zone_2004 == "3A" ~ "Warm Humid (3A)",
+                in_ashrae_iecc_climate_zone_2004 == "3B" ~ "Warm Dry (3B)",
+                in_ashrae_iecc_climate_zone_2004 == "3C" ~ "Warm Marine (3C)",
+                in_ashrae_iecc_climate_zone_2004 == "4A" ~ "Mixed Humid (4A)",
+                in_ashrae_iecc_climate_zone_2004 == "4B" ~ "Mixed Dry (4B)",
+                in_ashrae_iecc_climate_zone_2004 == "4C" ~ "Mixed Marine (4C)",
+                in_ashrae_iecc_climate_zone_2004 == "5A" ~ "Cool Humid (5A)",
+                in_ashrae_iecc_climate_zone_2004 == "5B" ~ "Cool Dry (5B)",
+                in_ashrae_iecc_climate_zone_2004 == "5C" ~ "Cool Marine (5C)",
+                in_ashrae_iecc_climate_zone_2004 == "6A" ~ "Cold Humid (6A)",
+                in_ashrae_iecc_climate_zone_2004 == "6B" ~ "Cold Dry (6B)",
+                in_ashrae_iecc_climate_zone_2004 %in% c("7A", '7B')  ~ "Very Cold (7A|B)",
+                in_ashrae_iecc_climate_zone_2004 == "7AK"  ~ "Subarctic",
+                TRUE ~ 'hmm'
+  )) |> 
+summarise(
+  min = min(out_load_cooling_energy_delivered_kbtu),
+  q1 = quantile(out_load_cooling_energy_delivered_kbtu, .25),
+  mean = mean(out_load_cooling_energy_delivered_kbtu),
+  median = median(out_load_cooling_energy_delivered_kbtu),
+  q3 = quantile(out_load_cooling_energy_delivered_kbtu, .75),
+  max = max(out_load_cooling_energy_delivered_kbtu),
+  sd = sd(out_load_cooling_energy_delivered_kbtu),
+  .by = c(iecc_climate_region_str)
+) |> 
+collect() 
+
+
+```
+:::
+
+## Underlying Predictions 
+
+```{r}
+#| label: 'pred plots xgboost'
+#| include: false
+clim_model_pred <-
+  map(names(model_objs),
+      ~pluck(model_objs[[.x]], 2)) |> 
+  set_names(names(model_objs))
+
+
+clim_model_pred <-
+  imap(clim_model_pred, ~.x |> mutate(clim_reg = .y)) |> 
+  list_rbind()
+
+better_exp <- 
+  clim_model_pred |> 
+  filter(wflow_id == 'cooling_pred_xgboost', clim_reg == 'hot_humid_assess.rds') |> 
+  ggplot(aes(out_load_cooling_energy_delivered_kbtu, .pred)) +
+  geom_point() +
+ geom_point(alpha = .55) +
+  geom_abline(intercept = 0, 
+              slope = 1, 
+              color = "red", 
+              linewidth = .55, 
+              linetype = 'dashed') +
+  coord_obs_pred() + 
+    scale_y_continuous(labels = scales::comma) +
+  scale_x_continuous(labels = scales::comma) +
+  theme_minimal()
+
+
+bad_exp <- 
+  clim_model_pred |> 
+  filter(wflow_id == 'cooling_pred_xgboost', clim_reg == 'cold_very_cold_humid_assess.rds') |> 
+  ggplot(aes(out_load_cooling_energy_delivered_kbtu, .pred)) +
+  geom_point(alpha = .55) +
+  geom_abline(intercept = 0, 
+              slope = 1, 
+              color = "red", 
+              linewidth = .55, 
+              linetype = 'dashed') +
+  coord_obs_pred() + 
+  scale_y_continuous(labels = scales::comma) +
+  scale_x_continuous(labels = scales::comma) +
+  theme_minimal()
+```
+
+
+::: {.panel-tabset}
+
+
+#### Hot-Humid
+```{r}
+#| fig-width: 8
+#| fig-height: 6
+
+better_exp
+```
+
+
+#### Cold, Very Cold - Humid
+
+```{r}
+#| fig-width: 8
+#| fig-height: 6
+
+bad_exp
+```
+:::
