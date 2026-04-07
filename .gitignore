@@ -9,3 +9,8 @@ code/archive/*
 data/*
 *.html
 quarto/*/*_files
+quarto/spend_sample_exploration/data/*
+quarto/talks/pred_model_walkthrough/cool_load_talk_files/*
+quarto/talks/pred_model_walkthrough/cool_load_talk_cache/*
+quarto/talks/pred_model_walkthrough/helper_files/*
+code/practice/*
