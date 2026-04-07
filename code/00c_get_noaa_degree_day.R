@@ -279,7 +279,11 @@ cdd_args <-
 hdd_args <-
   co_hdd_formatted |>
   mutate(exists_filter = glue::glue('{metric}_{county_arg}')) |>
-  filter(in_state == 'MD' & !exists_filter %in% redund_files) |>
+  filter(!exists_filter %in% redund_files) |>
+  filter(
+    sample_group == 'Cool Dry',
+    county_arg != 'SD-NA'
+  ) |>
   select(metric, county_arg)
 
 # chima_args <-
