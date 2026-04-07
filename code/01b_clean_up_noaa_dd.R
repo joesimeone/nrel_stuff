@@ -39,35 +39,59 @@ tst_states <-
 ## Regex to match up with our test states for the moment
 #file_pattern <- paste('cdd_', sep = "", tst_states, collapse = '|')
 
-noaa_files <-
+noaa_cdd_files <-
   list.files(
     here::here('data', 'noaa', 'intermediate'),
     full.names = TRUE,
     pattern = 'cdd_'
   )
 
+noaa_hdd_files <-
+  list.files(
+    here::here('data', 'noaa', 'intermediate'),
+    full.names = TRUE,
+    pattern = 'hdd_'
+  )
+
+
 ## States that we've pulled data for
-state_abbrev <- sub(".*_([A-Z]{2})-.*", "\\1", basename(noaa_files))
+state_abbrev <- sub(".*_([A-Z]{2})-.*", "\\1", basename(noaa_hdd_files))
 length(unique(state_abbrev))
 
-noaa_csvs <-
-  map(noaa_files, read_csv, show_col_types = FALSE) |>
+noaa_cdd_csvs <-
+  map(noaa_cdd_files, read_csv, show_col_types = FALSE) |>
+  list_rbind()
+
+noaa_hdd_csvs <-
+  map(noaa_hdd_files, read_csv, show_col_types = FALSE) |>
   list_rbind()
 
 ## In X county in year Y, there were Z total degree days
-noaa_summaries <-
-  noaa_csvs |>
+noaa_cdd_summaries <-
+  noaa_cdd_csvs |>
   mutate(year = year(date_formatted)) |>
   summarise(ann_cdd_days = sum(value), .by = c(year, county, metric))
+
+
+## Join w/ hdds on left hand side will return only counties that are in 
+## cleaned NREL data 
+noaa_hdd_summaries <-
+  noaa_hdd_csvs |>
+  mutate(year = year(date_formatted)) |>
+  summarise(ann_hdd_days = sum(value), .by = c(year, county, metric))
+
+noaa_summaries <-
+  noaa_cdd_summaries |> 
+  left_join(noaa_hdd_summaries, by = c('year', 'county'))
 
 ## In X county, there was an average of Z total degree days between 1970 - 2019
 degree_day_avgs <-
   noaa_summaries |>
   summarise(
     mean_cdd = mean(ann_cdd_days),
-    .by = c(county, metric)
+    mean_hdd = mean(ann_cdd_days),
+    .by = c(county)
   )
-
 
 ## ----------------------------------------------------------------------------=
 # Clean up the summarized data  ----
@@ -183,9 +207,8 @@ state_fips_tbl <- tibble(
 )
 
 ## Clean up data and add in some cleaner geographic identifers
-cdd_day_avgs_cl <-
+degree_day_avgs_cl <-
   degree_day_avgs |>
-  filter(metric == 'cdd') |>
   separate_wider_delim(
     c(county),
     delim = '-',
@@ -200,6 +223,6 @@ cdd_day_avgs_cl <-
 
 
 saveRDS(
-  cdd_day_avgs_cl,
-  here::here('data', 'workflow_dat', 'cdd_avg_state_sample.rds')
+  degree_day_avgs_cl,
+  here::here('data', 'workflow_dat', 'dd_avg_state_sample.rds')
 )

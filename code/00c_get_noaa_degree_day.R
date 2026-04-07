@@ -53,145 +53,6 @@ build_degree_day_call <- function(metric, county) {
 
 # Query Arguments --------------------------------------------------------
 
-## To help us make the api call more iterative
-#
-# ## Get county info
-# co_info <- counties(year = 2010) |>
-#   sf::st_drop_geometry() |>
-#   as_tibble()
-#
-# ## Get State abbs
-# state_fips_tbl <- tibble(
-#   state = c(
-#     "AL",
-#     "AK",
-#     "AZ",
-#     "AR",
-#     "CA",
-#     "CO",
-#     "CT",
-#     "DE",
-#     "FL",
-#     "GA",
-#     "HI",
-#     "ID",
-#     "IL",
-#     "IN",
-#     "IA",
-#     "KS",
-#     "KY",
-#     "LA",
-#     "ME",
-#     "MD",
-#     "MA",
-#     "MI",
-#     "MN",
-#     "MS",
-#     "MO",
-#     "MT",
-#     "NE",
-#     "NV",
-#     "NH",
-#     "NJ",
-#     "NM",
-#     "NY",
-#     "NC",
-#     "ND",
-#     "OH",
-#     "OK",
-#     "OR",
-#     "PA",
-#     "RI",
-#     "SC",
-#     "SD",
-#     "TN",
-#     "TX",
-#     "UT",
-#     "VT",
-#     "VA",
-#     "WA",
-#     "WV",
-#     "WI",
-#     "WY",
-#     "DC"
-#   ),
-#   fips = c(
-#     "01",
-#     "02",
-#     "04",
-#     "05",
-#     "06",
-#     "08",
-#     "09",
-#     "10",
-#     "12",
-#     "13",
-#     "15",
-#     "16",
-#     "17",
-#     "18",
-#     "19",
-#     "20",
-#     "21",
-#     "22",
-#     "23",
-#     "24",
-#     "25",
-#     "26",
-#     "27",
-#     "28",
-#     "29",
-#     "30",
-#     "31",
-#     "32",
-#     "33",
-#     "34",
-#     "35",
-#     "36",
-#     "37",
-#     "38",
-#     "39",
-#     "40",
-#     "41",
-#     "42",
-#     "44",
-#     "45",
-#     "46",
-#     "47",
-#     "48",
-#     "49",
-#     "50",
-#     "51",
-#     "53",
-#     "54",
-#     "55",
-#     "56",
-#     "11"
-#   )
-# )
-#
-# co_cdd_formatted <-
-#   co_info |>
-#   left_join(state_fips_tbl, by = c('STATEFP10' = 'fips')) |>
-#   select(state, COUNTYFP10) |>
-#   mutate(county_arg = glue('{state}-{COUNTYFP10}'), metric = 'cdd') |>
-#   filter(!state %in% c('AK', 'HI')) |>
-#   select(state, county_arg, metric) |>
-#   left_join(state_fips_tbl, by = c('state')) |>
-#   arrange(state, county_arg)
-#
-# co_hdd_formatted <-
-#   co_info |>
-#   left_join(state_fips_tbl, by = c('STATEFP10' = 'fips')) |>
-#   select(state, COUNTYFP10) |>
-#   mutate(county_arg = glue('{state}-{COUNTYFP10}'), metric = 'hdd') |>
-#   filter(!state %in% c('AK', 'HI')) |>
-#   select(state, county_arg, metric) |>
-#   arrange(county_arg) |>
-#   select(state, county_arg, metric) |>
-#   left_join(state_fips_tbl, by = c('state')) |>
-#   arrange(state, county_arg)
-
 co_cdd_formatted <-
   nrel_clean %>%
   mutate(
@@ -286,6 +147,10 @@ hdd_args <-
   ) |>
   select(metric, county_arg)
 
+
+tx_args <-
+    co_hdd_formatted |> 
+  filter(in_state == 'TX')
 # chima_args <-
 #   c(
 #     'IL-031',

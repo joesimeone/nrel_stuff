@@ -20,9 +20,9 @@ broad_covars_files <-
   )
 
 ## Degree day covariates
-cdd_covars <-
+dd_covars <-
   readRDS(
-    here::here('data', 'workflow_dat', 'cdd_avg_state_sample.rds')
+    here::here('data', 'workflow_dat', 'dd_avg_state_sample.rds')
   )
 
 ## PUMs covariates
@@ -45,7 +45,7 @@ dbWriteTable(
   overwrite = TRUE
 )
 
-dbWriteTable(con, 'cdd_covars', cdd_covars, temporary = TRUE, overwrite = TRUE)
+dbWriteTable(con, 'dd_covars', dd_covars, temporary = TRUE, overwrite = TRUE)
 
 ## db lazy talbes
 nrel_cl <-
@@ -54,14 +54,14 @@ nrel_cl <-
 pums_db <-
   tbl(con, 'pums_covars')
 
-cdd_db <-
-  tbl(con, 'cdd_covars')
+dd_db <-
+  tbl(con, 'dd_covars')
 
 ## Join data on geoid codes
 nrel_joined_dat <-
   nrel_cl |>
   left_join(pums_db, by = c('in_puma' = 'GISJOIN')) |>
-  left_join(cdd_db, by = c('in_county' = 'GISJOIN')) |>
+  left_join(dd_db, by = c('in_county' = 'GISJOIN')) |>
   collect() |>
   janitor::clean_names()
 
