@@ -388,51 +388,84 @@ nrel_pre_spec <-
 ```{r}
 
 tbl_names <- dbListTables(con)
-tbl_names <- unique(tbl_names[grep('_assess', tbl_names)])
+tbl_names <- unique(tbl_names[grep('^\\d[A-Z]', tbl_names)])
 
 # Create a list to pass to OJS
 ojs_data <- map(tbl_names, ~{
-  tbl(con, str_glue('train.{.x}')) |>
+  tbl(con, str_glue('train."{.x}"')) |>
     select(x_hhtype, x_year_broad, out_load_cooling_energy_delivered_kbtu) |>
+    rename(cool_load = out_load_cooling_energy_delivered_kbtu) |> 
     collect() |>
     mutate(table_name = .x)
 }) |> 
   list_rbind()
 
-ojs_define(plot_data = ojs_data, table_list = tbl_names)
+ojs_define(plot_data_def = ojs_data, table_list = tbl_names)
 
 ```
 
 ```{ojs}
-
 //| echo: false
 
-//| echo: false
 Plot = require("@observablehq/plot@0.6.13")
 
-// table_list is already an array, no transpose needed
+/* ------------------------------------------------------------------
+   1. Safely receive data from R
+   ------------------------------------------------------------------ */
+
+// plot_data comes from R; it may be undefined on first pass
+plot_data = plot_data_def ? transpose(plot_data_def) : []
+
+/* ------------------------------------------------------------------
+   2. Table selector
+   ------------------------------------------------------------------ */
+
+// table_list is already an array coming from R
 viewof selected_table = Inputs.select(
-  table_list,
-  {label: "Select Assessment Table:"}
+  table_list ?? [],
+  { label: "Select Assessment Table:" }
 )
 
-// Use transpose for plot_data since it's a data frame
-filtered_data = transpose(plot_data).filter(d => d.table_name === selected_table)
+/* ------------------------------------------------------------------
+   3. Filter data based on selection
+   ------------------------------------------------------------------ */
+
+filtered_data =
+  plot_data.length && selected_table
+    ? plot_data.filter(d => d.table_name === selected_table)
+    : []
+
+/* ------------------------------------------------------------------
+   4. Order year buckets safely
+   ------------------------------------------------------------------ */
 
 year_order = {
-  const order = {' Before 1940': 0, ' 1940 - 1980': 1, ' After 1980': 2};
-  return filtered_data.map(d => ({...d, year_order: order[d.x_year_broad] || 3}))
+  const order = {
+    " Before 1940": 0,
+    " 1940 - 1980": 1,
+    " After 1980": 2
+  };
+
+  return filtered_data
+    .map(d => ({
+      ...d,
+      year_order: order[d.x_year_broad] ?? 3
+    }))
     .sort((a, b) => a.year_order - b.year_order);
 }
 
+/* ------------------------------------------------------------------
+   5. Plot (only renders once data exists)
+   ------------------------------------------------------------------ */
+
 Plot.plot({
-  title: selected_table,
+  title: selected_table ?? "",
   marginLeft: 60,
   height: 400,
   grid: true,
-  x: {label: "Cooling Energy Delivered (kBTU)"},
-  y: {label: "Count", tickFormat: "~s"},
-  color: {legend: true, scheme: "dark2"},
+  x: { label: "Cooling (kBTU)" },
+  y: { label: "Count", tickFormat: "~s" },
+  color: { legend: true, scheme: "dark2" },
   facet: {
     data: year_order,
     x: "x_year_broad",
@@ -442,8 +475,13 @@ Plot.plot({
     Plot.rectY(
       year_order,
       Plot.binX(
-        {y: "count"},
-        {x: "out_load_cooling_energy_delivered_kbtu", fill: "x_hhtype", thresholds: 30}
+        { y: "count" },
+        {
+          x: "cool_load",
+          fill: "x_hhtype",
+          thresholds: 30,
+          tip: true  }      
+          
       )
     ),
     Plot.ruleY([0])
