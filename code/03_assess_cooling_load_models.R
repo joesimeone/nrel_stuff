@@ -12,15 +12,6 @@ con <- dbConnect(duckdb(), 'data/nrel.duckdb')
 
 dbListTables(con)
 
-ac_prev_estimates <-
-  read_csv(
-    here(
-      'data',
-      'ac_prev_est',
-      'ac_county_estimates_cl_2020.csv'
-    )
-  )
-
 
 ## ----------------------------------------------------------------------------=
 # Getting Everything together ----
@@ -68,15 +59,7 @@ nrel_tbl <-
     across(where(is.character), ~ as.factor(.))
   )
 
-
-## Add in AC prevalence
-
-nrel_tbl <-
-  nrel_tbl |>
-  left_join(
-    ac_prev_estimates,
-    by = c('in_county' = 'GISJOIN')
-  )
+dbListTables(con)
 
 
 ## ----------------------------------------------------------------------------=
@@ -87,21 +70,9 @@ nrel_tbl <-
 nrel_tbl %>%
   filter(if_any(everything(), is.na))
 
-## How many missing AC prevs are we excluding???? (4339 households)
-nrel_tbl |>
-  filter(is.na(mean_ac_pct_prev)) |>
-  summarise(
-    n_miss = sum(is.na(mean_ac_pct_prev)),
-    .by = c(in_county)
-  ) |>
-  mutate(
-    sum_miss = sum(n_miss)
-  ) |>
-  arrange(desc(n_miss))
 
 ## How many individual counties and where? (163, not spread evenely across clim reg)
 nrel_tbl |>
-  filter(is.na(mean_ac_pct_prev)) |>
   select(in_ashrae_iecc_climate_zone_2004, in_county) |>
   distinct(in_ashrae_iecc_climate_zone_2004, in_county) |>
   arrange(in_ashrae_iecc_climate_zone_2004, in_county) |>
@@ -137,9 +108,6 @@ nrel_tbl |>
 ## FINISHED SAMPLE OBJECT
 nrel_tbl_fin <-
   nrel_tbl |>
-  filter(
-    !is.na(mean_ac_pct_prev)
-  ) |>
   mutate(
     in_ashrae_iecc_climate_zone_2004 = case_when(
       in_ashrae_iecc_climate_zone_2004 %in% c('7A', '6A') ~ '7A_or_6A',
@@ -154,7 +122,7 @@ nrel_tbl_fin <-
 nrel_tbl_split <-
   split(nrel_tbl_fin, nrel_tbl_fin$in_ashrae_iecc_climate_zone_2004)
 
-
+names(nrel_tbl_split) <- glue::glue('ashrae_{names(nrel_tbl_split)}')
 ## ---------------------------------------------------------------------------=
 # Test Train Split -----
 ## ---------------------------------------------------------------------------=
@@ -192,23 +160,35 @@ nrel_test <-
   set_names(names(nrel_samp_split))
 #mutate(weight = frequency_weights(weight)) ## Going to ignore because all weights are the same
 
+dbExecute(
+  con,
+  "CREATE SCHEMA IF NOT EXISTS cooling_train;"
+)
+
+
+dbExecute(
+  con,
+  "CREATE SCHEMA IF NOT EXISTS cooling_test;"
+)
+
 ## Write training and test sets to database for posterity and further analyses
 map2(
   nrel_train,
   names(nrel_train),
   ~ DBI::dbWriteTable(
     con,
-    DBI::Id(schema = "train", table = str_glue('{.y}')),
+    DBI::Id(schema = "cooling_train", table = str_glue('{.y}')),
     value = .x,
     overwrite = TRUE
   )
 )
+
 map2(
   nrel_test,
   names(nrel_test),
   ~ DBI::dbWriteTable(
     con,
-    DBI::Id(schema = "test", table = str_glue('{.y}')),
+    DBI::Id(schema = "cooling_test", table = str_glue('{.y}')),
     value = .x,
     overwrite = TRUE
   )
@@ -337,6 +317,7 @@ cool_wflow_set <-
 #     save_pred = TRUE
 #   )
 #
+
 daemons(6, output = TRUE)
 
 cool_model_outputs <- pmap(
@@ -419,17 +400,25 @@ cool_pred_fin <-
 
 dbExecute(
   con,
-  "CREATE SCHEMA IF NOT EXISTS model_comps;"
+  "CREATE SCHEMA IF NOT EXISTS cool_model_comps;"
 )
 
 
-dbWriteTable(con, 'model_comps.ashrae_climate_region_metrics', cool_metrics_fin)
-dbWriteTable(
+DBI::dbWriteTable(
   con,
-  'model_comps.ashrae_climate_region_predictions',
+  DBI::Id(schema = "cool_model_comps", table = "ashrae_climate_region_metrics"),
+  cool_metrics_fin
+)
+
+DBI::dbWriteTable(
+  con,
+  DBI::Id(
+    schema = "cool_model_comps",
+    table = "ashrae_climate_region_predictions"
+  ),
   cool_pred_fin
 )
 
 dbListTables(con, schema = 'main')
 
-tbl(con, 'model_comps.ashrae_climate_region_metrics')
+dbDisconnect(con, TRUE)
